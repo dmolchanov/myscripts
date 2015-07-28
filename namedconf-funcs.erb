@@ -1,0 +1,185 @@
+#indent each line of variable
+def indent(v,depth=1)
+    if v.nil?
+        return(nil)
+    end
+    if v[-1,1] == "\n"
+        suffix = "\n"
+    else
+        suffix = ""
+    end
+    prefix = " " * 4
+    result = v.split("\n").map { |l| prefix * depth + l }.join("\n")
+    result += suffix
+    result
+end
+#render array (it is reused some times)
+def render_array(opt,val,oneline=4)
+    result = "#{opt} { "
+    if val.length < oneline
+        result += val.join("; ") + "; "
+    else
+        result += "\n" + val.map { |l| indent(l +";") }.join("\n")+"\n"
+    end
+    result += "};"
+    result
+end
+
+def render_hash(opt,val)
+    result = "#{opt} { "
+    if val.length < 3
+        suffix = " "
+        inum = 0
+    else
+        suffix = "\n"
+        result += "\n"
+        inum = 1
+    end
+    val.sort.each do |k,v|
+        result += indent(render_value(k,v),inum) + suffix
+    end
+    result += "};"
+    result
+end
+
+# function for rendering values
+def render_value(opt,val)
+    # define a list of variables that MUST be quoted strings
+    qval = ['file','bindkeys-file','directory','managed-keys-directory',
+            'version','managed-keys-directory','server-id','pid-file','statistics-file','dump-file']
+    result=""
+    if val.nil?
+        return nil
+    end
+    if val.kind_of?(Array)
+        result += render_array(opt,val)
+    elsif val.kind_of?(Hash)
+        result += render_hash(opt,val)
+    elsif val.kind_of?(String) || val.kind_of?(Fixnum)
+        if qval.include?(opt)
+            result = "#{opt} \"#{val}\";"
+        else
+            result = "#{opt} #{val};"
+        end
+    elsif !!val == val
+        v = (val === true) ? 'yes' : 'no'
+        result = "#{opt} #{v};"
+    end
+    result
+end
+#get final option value
+#apply view-specific overrides
+def getval(zone_data,opt,view=nil)
+    result=nil
+    if zone_data[opt].nil? && !view.nil?
+        # here we check if zone has specific option defined for the view
+        if (!zone_data['views'].nil? &&
+            zone_data['views'].has_key?(view) &&
+            (
+                !zone_data['views'][view].nil? &&
+                zone_data['views'][view].has_key?(opt)
+            ) )
+            result=zone_data['views'][view][opt]
+        # here we chech if zone has view-specific options
+        elsif (
+                !(zone_data['views'].nil?) &&
+                (
+                    # and if zone has no zone-specific option value
+                    (
+                        zone_data['views'].has_key?(view) &&
+                            (
+                                !zone_data['views'][view].nil? &&
+                                !zone_data['views'][view].has_key?(opt)
+                            )
+                    ) ||
+                    # or zone has no zone-specific settings for the view
+                    (
+                        zone_data['views'].has_key?(view) &&
+                        zone_data['views'][view].nil?)
+                ) &&
+                # and zone has default view setting and option is defined there
+                (
+                    zone_data['views'].has_key?('default') &&
+                    (
+                        !zone_data['views']['default'].nil? &&
+                        zone_data['views']['default'].has_key?(opt)
+                    )
+                )
+            )
+            result=zone_data['views']['default'][opt]
+        else
+        # in any other case we use file option
+            if !zone_data[opt].nil?
+                result = zone_data[opt]
+            end
+        end
+    end
+    result
+end
+
+
+#render zone data
+def render_zone(zone,zone_data,view=nil)
+    custom_opts = ['masters','file','type','views']
+    result = ""
+    # check if views are enabled
+    # if they are check if zone is enabled in the view
+    # if zone have no views listed that assumes presence in all views
+    if !view.nil?
+        if (!(zone_data['views'].nil?) && !(zone_data['views'].has_key?(view)))
+            return(nil)
+        end
+        result = "#zone #{zone} in view #{view}\n"
+    else
+        inum = 0
+    end
+    result += "zone \"#{zone}\" IN {\n"
+    if ((zone_data['type'].nil?) || (zone_data['type'].empty?) || (zone_data['type'] == 'regular'))
+        if zone_data['masters'].include?(@fqdn)
+            type = 'master'
+        else
+            type = 'slave'
+        end
+    else
+        type = zone_data['type']
+    end
+    result += indent(render_value('type',type),1)+"\n"
+
+    if type == 'slave'
+        if @masters.include?(zone_data['masters'][0])
+            master = [@masters[zone_data['masters'][0]]]
+        else
+            master = zone_data['masters']
+        end
+        # check if view is defined - compose file name for view-oriented config
+        # otherwise - for plain config
+        if view.nil?
+            file = "slave/#{zone}"
+        else
+            file = "slave/#{view}/#{zone}"
+        end
+        result += indent(render_value('masters',master))+"\n"
+    else
+        # even if we have views enabled file for master zone isn't generated automatically
+        # and may be common within all views
+        if zone_data['file'].nil? && view.nil?
+            file = "master/#{zone}"
+        else
+            file = getval(zone_data,'file',view)
+            if file.nil? || zone_data['file'] == 'default'
+                file = "master/#{zone}"
+            end
+        end
+    end
+    result += indent(render_value('file',file),1)+"\n"
+    zone_data.sort.each do |opt,val|
+        if !custom_opts.include?(opt)
+            final_val=getval(zone_data,opt,view)
+            if !final_val.nil?
+                result += indent(render_value(opt,final_val),1)+"\n"
+            end
+        end
+    end
+    result+= "};\n"
+    result
+end
